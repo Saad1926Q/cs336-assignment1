@@ -21,6 +21,89 @@ def _pretokenize_document(doc: str) -> Counter[str]:
     return freq
 
 
+def _get_pretoken_counts(documents: list[str]) -> Counter[str]:
+    pretoken_counts = Counter()
+
+    for doc in documents:
+        counts = _pretokenize_document(doc)
+
+        pretoken_counts.update(counts)
+
+    return pretoken_counts
+
+
+def _pretokens_to_byte_sequence_counts(pretoken_counts: Counter[str]) -> Counter[tuple[bytes, ...]]:
+    sequence_counts = Counter()
+
+    for pretoken, count in pretoken_counts.items():
+        encoded = pretoken.encode("utf-8")
+
+        byte_seq = tuple(bytes([b]) for b in encoded)
+
+        sequence_counts[byte_seq] = count
+
+    return sequence_counts
+
+
+def _initialize_vocab(special_tokens: list[str]) -> dict[int, bytes]:
+    vocab = {i: bytes([i]) for i in range(256)}
+
+    for i, token in enumerate(special_tokens):
+        vocab[256 + i] = token.encode("utf-8")
+
+    return vocab
+
+
+def _count_adjacent_pairs(sequence_counts: Counter[tuple[bytes, ...]]) -> Counter[tuple[bytes, bytes]]:
+    pair_counts = Counter()
+
+    for seq, count in sequence_counts.items():
+        for i in range(0, len(seq) - 1):
+            pair = tuple(seq[i : i + 2])
+            pair_counts[pair] += count
+
+    return pair_counts
+
+
+def _choose_best_pair(pair_counts: Counter[tuple[bytes, bytes]]) -> tuple[bytes, bytes]:
+    _, best_count = pair_counts.most_common(1)[0]
+
+    contenders = []
+
+    for pair, count in pair_counts.items():
+        if count == best_count:
+            contenders.append(pair)
+
+    best_pair = max(contenders)
+
+    return best_pair
+
+
+def _apply_merge(
+    sequence_counts: Counter[tuple[bytes, ...]], best_pair: tuple[bytes, bytes], merged_token: bytes
+) -> Counter[tuple[bytes, ...]]:
+    updated_sequence_counts = Counter()
+
+    for seq, count in sequence_counts.items():
+        merged_seq = []
+
+        i = 0
+
+        while i < len(seq):
+            if i < len(seq) - 1 and (seq[i], seq[i + 1]) == best_pair:
+                merged_seq.append(merged_token)
+                i += 2
+            else:
+                merged_seq.append(seq[i])
+                i += 1
+
+        merged_seq = tuple(merged_seq)
+
+        updated_sequence_counts[merged_seq] += count
+
+    return updated_sequence_counts
+
+
 def train_bpe(
     input_path: str, vocab_size: int, special_tokens: list[str]
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
@@ -30,78 +113,34 @@ def train_bpe(
     with open(input_path, encoding="utf-8") as f:
         corpus = f.read()
 
-    frequencies = Counter()
-
     documents = _get_documents(corpus)
 
-    for doc in documents:
-        counts = _pretokenize_document(doc)
+    pretoken_counts = _get_pretoken_counts(documents)
 
-        frequencies.update(counts)
+    sequence_counts = _pretokens_to_byte_sequence_counts(pretoken_counts)
 
-    pretoken_byte_sequences = Counter()
-
-    for pretoken, freq in frequencies.items():
-        encoded = pretoken.encode("utf-8")
-
-        byte_seq = tuple(bytes([b]) for b in encoded)
-
-        pretoken_byte_sequences[byte_seq] = freq
-
-    vocab = {i: bytes([i]) for i in range(256)}
-
-    for i, token in enumerate(special_tokens):
-        vocab[256 + i] = token.encode("utf-8")
+    vocab = _initialize_vocab(special_tokens)
 
     merges = []
 
     while len(vocab) < vocab_size:
-        freq_counter = Counter()
+        pair_counts = _count_adjacent_pairs(sequence_counts)
 
-        for seq, count in pretoken_byte_sequences.items():
-            for i in range(0, len(seq) - 1):
-                pair = tuple(seq[i : i + 2])
-                freq_counter[pair] += count
-
-        if not freq_counter:
+        if not pair_counts:
             break
 
-        _, best_freq = freq_counter.most_common(1)[0]
-
-        contenders = []
-
-        for pair, count in freq_counter.items():
-            if count == best_freq:
-                contenders.append(pair)
-
-        best_pair = max(contenders)
+        best_pair = _choose_best_pair(pair_counts)
 
         merges.append(best_pair)
 
         merged_id = len(vocab)
 
-        merged_pair = best_pair[0] + best_pair[1]
+        merged_token = best_pair[0] + best_pair[1]
 
-        vocab[merged_id] = merged_pair
+        vocab[merged_id] = merged_token
 
-        new_seq = Counter()
+        updated_sequence_counts = _apply_merge(sequence_counts, best_pair, merged_token)
 
-        for seq, count in pretoken_byte_sequences.items():
-            merged_seq = []
-
-            i = 0
-            while i < len(seq):
-                if i < len(seq) - 1 and (seq[i], seq[i + 1]) == best_pair:
-                    merged_seq.append(merged_pair)
-                    i += 2
-                else:
-                    merged_seq.append(seq[i])
-                    i += 1
-
-            merged_seq = tuple(merged_seq)
-
-            new_seq[merged_seq] += count
-
-        pretoken_byte_sequences = new_seq
+        sequence_counts = updated_sequence_counts
 
     return vocab, merges
