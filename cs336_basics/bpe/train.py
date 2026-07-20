@@ -1,4 +1,4 @@
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import regex as re
@@ -54,15 +54,19 @@ def _initialize_vocab(special_tokens: list[str]) -> dict[int, bytes]:
     return vocab
 
 
-def _count_adjacent_pairs(sequence_counts: Counter[tuple[bytes, ...]]) -> Counter[tuple[bytes, bytes]]:
+def _build_pair_counts_and_mappings(
+    sequence_counts: Counter[tuple[bytes, ...]],
+) -> tuple[Counter[tuple[bytes, bytes]], defaultdict[tuple[bytes, bytes], set[tuple[bytes, ...]]]]:
     pair_counts = Counter()
+    pair_to_sequences = defaultdict(set)
 
     for seq, count in sequence_counts.items():
         for i in range(0, len(seq) - 1):
             pair = tuple(seq[i : i + 2])
             pair_counts[pair] += count
+            pair_to_sequences[pair].add(seq)
 
-    return pair_counts
+    return pair_counts, pair_to_sequences
 
 
 def _choose_best_pair(pair_counts: Counter[tuple[bytes, bytes]]) -> tuple[bytes, bytes]:
@@ -79,29 +83,26 @@ def _choose_best_pair(pair_counts: Counter[tuple[bytes, bytes]]) -> tuple[bytes,
     return best_pair
 
 
-def _apply_merge(
-    sequence_counts: Counter[tuple[bytes, ...]], best_pair: tuple[bytes, bytes], merged_token: bytes
-) -> Counter[tuple[bytes, ...]]:
-    updated_sequence_counts = Counter()
+def _merge_sequence(
+    sequence: tuple[bytes, ...],
+    best_pair: tuple[bytes, bytes],
+    merged_token: bytes,
+) -> tuple[bytes, ...]:
+    merged_seq = []
 
-    for seq, count in sequence_counts.items():
-        merged_seq = []
+    i = 0
 
-        i = 0
+    while i < len(sequence):
+        if i < len(sequence) - 1 and (sequence[i], sequence[i + 1]) == best_pair:
+            merged_seq.append(merged_token)
+            i += 2
+        else:
+            merged_seq.append(sequence[i])
+            i += 1
 
-        while i < len(seq):
-            if i < len(seq) - 1 and (seq[i], seq[i + 1]) == best_pair:
-                merged_seq.append(merged_token)
-                i += 2
-            else:
-                merged_seq.append(seq[i])
-                i += 1
+    merged_seq = tuple(merged_seq)
 
-        merged_seq = tuple(merged_seq)
-
-        updated_sequence_counts[merged_seq] += count
-
-    return updated_sequence_counts
+    return merged_seq
 
 
 def train_bpe(
@@ -123,9 +124,9 @@ def train_bpe(
 
     merges = []
 
-    while len(vocab) < vocab_size:
-        pair_counts = _count_adjacent_pairs(sequence_counts)
+    pair_counts, pair_to_sequences = _build_pair_counts_and_mappings(sequence_counts)
 
+    while len(vocab) < vocab_size:
         if not pair_counts:
             break
 
@@ -139,8 +140,39 @@ def train_bpe(
 
         vocab[merged_id] = merged_token
 
-        updated_sequence_counts = _apply_merge(sequence_counts, best_pair, merged_token)
+        affected_sequences = pair_to_sequences[best_pair].copy()
 
-        sequence_counts = updated_sequence_counts
+        for old_seq in affected_sequences:
+            count = sequence_counts[old_seq]
+
+            old_pairs_seen = set()
+
+            for i in range(0, len(old_seq) - 1):
+                pair = (old_seq[i], old_seq[i + 1])
+
+                pair_counts[pair] -= count
+
+                if pair_counts[pair] == 0:
+                    del pair_counts[pair]
+
+                old_pairs_seen.add(pair)
+
+            for pair in old_pairs_seen:
+                pair_to_sequences[pair].remove(old_seq)
+
+                if not pair_to_sequences[pair]:
+                    del pair_to_sequences[pair]
+
+            del sequence_counts[old_seq]
+
+            new_seq = _merge_sequence(old_seq, best_pair, merged_token)
+
+            sequence_counts[new_seq] += count
+
+            for i in range(0, len(new_seq) - 1):
+                pair = (new_seq[i], new_seq[i + 1])
+
+                pair_counts[pair] += count
+                pair_to_sequences[pair].add(new_seq)
 
     return vocab, merges
