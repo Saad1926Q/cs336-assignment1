@@ -6,10 +6,6 @@ import regex as re
 PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 
-def _get_documents(corpus: str) -> list[str]:
-    return corpus.split("<|endoftext|>")
-
-
 def _pretokenize_document(doc: str) -> Counter[str]:
     freq = Counter()
 
@@ -21,13 +17,34 @@ def _pretokenize_document(doc: str) -> Counter[str]:
     return freq
 
 
-def _get_pretoken_counts(documents: list[str]) -> Counter[str]:
+def _get_pretoken_counts_streaming(input_path: str) -> Counter[str]:
     pretoken_counts = Counter()
 
-    for doc in documents:
-        counts = _pretokenize_document(doc)
+    leftover = ""
 
-        pretoken_counts.update(counts)
+    delimiter = "<|endoftext|>"
+
+    chunk_size = 16 * 1024 * 1024
+
+    with open(input_path, encoding="utf-8") as f:
+        while True:
+            chunk = f.read(chunk_size)
+
+            if not chunk:
+                break
+
+            text = leftover + chunk
+
+            parts = text.split(delimiter)
+
+            for doc in parts[:-1]:
+                counts = _pretokenize_document(doc)
+                pretoken_counts.update(counts)
+
+            leftover = parts[-1]
+
+    if leftover:
+        pretoken_counts.update(_pretokenize_document(leftover))
 
     return pretoken_counts
 
@@ -111,12 +128,7 @@ def train_bpe(
     if not Path(input_path).exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
-    with open(input_path, encoding="utf-8") as f:
-        corpus = f.read()
-
-    documents = _get_documents(corpus)
-
-    pretoken_counts = _get_pretoken_counts(documents)
+    pretoken_counts = _get_pretoken_counts_streaming(input_path)
 
     sequence_counts = _pretokens_to_byte_sequence_counts(pretoken_counts)
 
