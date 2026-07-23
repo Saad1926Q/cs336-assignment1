@@ -15,8 +15,11 @@ def main():
 
     longest_token = max(vocab.values(), key=lambda token: len(token))
 
-    with open("data/tinystories_bpe.pkl", "wb") as f:
-        pickle.dump({"vocab": vocab, "merges": merges}, f)
+    with open("data/tinystories_vocab.pkl", "wb") as f:
+        pickle.dump(vocab, f)
+
+    with open("data/tinystories_merges.pkl", "wb") as f:
+        pickle.dump(merges, f)
 
     print(f"Training took {elapsed:.2f} seconds")
     print(f"Training took {elapsed / 60:.2f} minutes")
